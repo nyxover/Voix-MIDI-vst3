@@ -12,4 +12,11 @@ Plugin audio-effet : il écoute le micro, détecte les notes (chant, sifflement,
 1. Pose « Voix MIDI » comme effet sur une piste audio dont l'entrée est ton micro (monitoring sur In).
 2. Lance la lecture, clique Enregistrer : l'enregistrement démarre à la prochaine mesure.
 3. Glisse le bloc rose vers une piste MIDI pour créer le clip (ou Exporter .mid).
-# Voix-MIDI-vst3
+
+## Mode live (vers d'autres VST)
+Ableton ne laisse pas un VST envoyer du MIDI vers une autre piste. Le plugin envoie donc les notes vers un port MIDI virtuel :
+1. Installe loopMIDI (Tobias Erichsen) et crée un port.
+2. Dans le plugin : coche « Mode live », choisis le port dans « Sortie MIDI » (bouton Actualiser si absent).
+3. Ableton > Préférences > Link/Tempo/MIDI : active « Track » sur l'entrée de ce port.
+4. Sur une piste MIDI avec un instrument, mets « MIDI From » sur ce port, monitoring sur In.
+Latence d'environ 70 ms (détection de hauteur). La gamme et l'octave s'appliquent aussi en live.

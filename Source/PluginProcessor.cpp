@@ -22,6 +22,7 @@ AudioProcessorValueTreeState::ParameterLayout VoixMidiProcessor::makeLayout()
     l.add (std::make_unique<AudioParameterChoice> (ParameterID { "root", 1 }, "Tonique",
            StringArray { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" }, 0));
     l.add (std::make_unique<AudioParameterInt> (ParameterID { "oct", 1 }, "Octave", -3, 3, 0));
+    l.add (std::make_unique<AudioParameterBool> (ParameterID { "live", 1 }, "Mode live", false));
     l.add (std::make_unique<AudioParameterFloat> (ParameterID { "sens", 1 }, "Sensibilite",
            NormalisableRange<float> (1.0f, 10.0f, 0.1f), 5.0f));
     return l;
@@ -85,9 +86,14 @@ float VoixMidiProcessor::yin (const float* x, int n) const
 void VoixMidiProcessor::closeNote()
 {
     if (! hasCur) return;
-    Note n = cur;
-    n.dur = jmax (0.05, curLast - cur.start + 0.03 * bpm.load() / 60.0);
-    { ScopedLock sl (lock); raw.push_back (n); }
+    emitOff();
+    if (mode.load() == Recording)
+    {
+        Note n = cur;
+        n.dur = jmax (0.05, curLast - cur.start + 0.03 * bpm.load() / 60.0);
+        ScopedLock sl (lock);
+        raw.push_back (n);
+    }
     hasCur = false;
 }
 
@@ -107,12 +113,12 @@ void VoixMidiProcessor::feed (double b, float m, float rms)
     {
         if (std::abs (m - cur.midi) < 0.7f) { curLast = b; cur.vel = jmax (cur.vel, v); cand = -999; candN = 0; return; }
         if (cand == r) ++candN; else { cand = r; candN = 1; candB = b; }
-        if (candN >= minSwitch) { closeNote(); cur = { r, candB, 0.0, v }; curLast = b; hasCur = true; cand = -999; candN = 0; }
+        if (candN >= minSwitch) { closeNote(); cur = { r, candB, 0.0, v }; curLast = b; hasCur = true; cand = -999; candN = 0; emitOn(); }
     }
     else
     {
         if (cand == r) ++candN; else { cand = r; candN = 1; candB = b; }
-        if (candN >= minOn) { cur = { r, candB, 0.0, v }; curLast = b; hasCur = true; cand = -999; candN = 0; }
+        if (candN >= minOn) { cur = { r, candB, 0.0, v }; curLast = b; hasCur = true; cand = -999; candN = 0; emitOn(); }
     }
 }
 
@@ -133,13 +139,15 @@ void VoixMidiProcessor::analyse (double frameBeat, bool playing)
     liveMidi = m;
     level = jmin (1.0f, rms / thr * 0.25f);
 
-    const int md = mode.load();
-    if (md == Armed)
+    liveActive = apvts.getRawParameterValue ("live")->load() > 0.5f;
+    if (! liveActive) emitOff();
+    liveT += (HOP / sr) * bpm.load() / 60.0;
+
+    if (mode.load() == Armed && playing)
     {
-        if (! playing) return;
         if (recStart < 0.0) recStart = std::ceil (frameBeat / 4.0 - 1e-6) * 4.0;
-        if (frameBeat >= recStart) mode = Recording;
-        else { recBeat = frameBeat - recStart; return; }
+        if (frameBeat >= recStart) { closeNote(); mode = Recording; }
+        else recBeat = frameBeat - recStart;
     }
     if (mode.load() == Recording)
     {
@@ -156,6 +164,21 @@ void VoixMidiProcessor::analyse (double frameBeat, bool playing)
             recStart = -1.0;
         }
     }
+    else if (liveActive)
+        feed (liveT, m, rms);
+}
+
+void VoixMidiProcessor::emitOn()
+{
+    if (! liveActive || ! sender.isOpen()) return;
+    heldNote = mapNote (cur.midi);
+    sender.push (true, heldNote, cur.vel);
+}
+void VoixMidiProcessor::emitOff()
+{
+    if (heldNote < 0) return;
+    sender.push (false, heldNote, 0);
+    heldNote = -1;
 }
 
 void VoixMidiProcessor::processBlock (AudioBuffer<float>& b, MidiBuffer&)
@@ -216,12 +239,31 @@ void VoixMidiProcessor::clearNotes()
     mode = Idle;
 }
 
-std::vector<Note> VoixMidiProcessor::getNotes() const
+int VoixMidiProcessor::mapNote (int midi) const
 {
-    const float g = kQuant[jlimit (0, 3, (int) apvts.getRawParameterValue ("quant")->load())];
     const int sc = jlimit (0, 4, (int) apvts.getRawParameterValue ("scale")->load());
     const int root = (int) apvts.getRawParameterValue ("root")->load();
     const int tr = 12 * (int) apvts.getRawParameterValue ("oct")->load();
+    int best = midi, bd = 99;
+    if (! kScales[sc].empty())
+        for (int x = midi - 6; x <= midi + 6; ++x)
+        {
+            const int deg = ((x - root) % 12 + 12) % 12;
+            if (std::find (kScales[sc].begin(), kScales[sc].end(), deg) != kScales[sc].end()
+                && std::abs (x - midi) < bd) { bd = std::abs (x - midi); best = x; }
+        }
+    return jlimit (0, 127, best + tr);
+}
+
+void VoixMidiProcessor::setMidiDevice (const String& id)
+{
+    { ScopedLock sl (lock); midiId = id; }
+    sender.setDevice (id);
+}
+
+std::vector<Note> VoixMidiProcessor::getNotes() const
+{
+    const float g = kQuant[jlimit (0, 3, (int) apvts.getRawParameterValue ("quant")->load())];
     const double L = loopBeats();
 
     std::vector<Note> out;
@@ -237,18 +279,7 @@ std::vector<Note> VoixMidiProcessor::getNotes() const
             }
             if (n.start >= L) n.start -= L;
             n.dur = jmax (0.05, jmin (n.dur, L - n.start));
-            if (! kScales[sc].empty())
-            {
-                int best = n.midi, bd = 99;
-                for (int x = n.midi - 6; x <= n.midi + 6; ++x)
-                {
-                    const int deg = ((x - root) % 12 + 12) % 12;
-                    if (std::find (kScales[sc].begin(), kScales[sc].end(), deg) != kScales[sc].end()
-                        && std::abs (x - n.midi) < bd) { bd = std::abs (x - n.midi); best = x; }
-                }
-                n.midi = best;
-            }
-            n.midi = jlimit (0, 127, n.midi + tr);
+            n.midi = mapNote (n.midi);
             out.push_back (n);
         }
     }
@@ -290,6 +321,7 @@ void VoixMidiProcessor::getStateInformation (MemoryBlock& dest)
     String s;
     { ScopedLock sl (lock); for (auto& n : raw) s << n.midi << "," << n.start << "," << n.dur << "," << n.vel << ";"; }
     st.setProperty ("notes", s, nullptr);
+    st.setProperty ("midiOut", getMidiDevice(), nullptr);
     if (auto xml = st.createXml()) copyXmlToBinary (*xml, dest);
 }
 
@@ -309,6 +341,7 @@ void VoixMidiProcessor::setStateInformation (const void* data, int size)
                 if (f.size() == 4) loaded.push_back ({ f[0].getIntValue(), f[1].getDoubleValue(), f[2].getDoubleValue(), f[3].getIntValue() });
             }
             apvts.replaceState (vt);
+            setMidiDevice (vt.getProperty ("midiOut").toString());
             { ScopedLock sl (lock); raw = loaded; }
             mode = loaded.empty() ? Idle : Done;
         }

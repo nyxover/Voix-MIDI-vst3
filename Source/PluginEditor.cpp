@@ -108,7 +108,7 @@ void DragPad::mouseDrag (const MouseEvent& e)
 VoixMidiEditor::VoixMidiEditor (VoixMidiProcessor& p)
     : AudioProcessorEditor (&p), proc (p), roll (p), pad (p)
 {
-    setSize (760, 460);
+    setSize (760, 500);
 
     for (auto* b : { &recBtn, &stopBtn, &clearBtn, &saveBtn }) addAndMakeVisible (b);
     recBtn.setColour (TextButton::buttonColourId, kAcc);
@@ -153,7 +153,38 @@ VoixMidiEditor::VoixMidiEditor (VoixMidiProcessor& p)
     addAndMakeVisible (statusLbl);
     addAndMakeVisible (roll);
     addAndMakeVisible (pad);
+    addAndMakeVisible (liveBtn);
+    liveBtn.setColour (ToggleButton::textColourId, Colours::white);
+    liveBtn.setColour (ToggleButton::tickColourId, kAcc);
+    aLive = std::make_unique<BA> (proc.apvts, "live", liveBtn);
+    addAndMakeVisible (midiOut);
+    addAndMakeVisible (refreshBtn);
+    lPort.setColour (Label::textColourId, kMut);
+    lPort.setFont (Font (12.0f));
+    addAndMakeVisible (lPort);
+    refreshBtn.onClick = [this] { fillDevices(); };
+    midiOut.onChange = [this]
+    {
+        const int i = midiOut.getSelectedId() - 2;
+        proc.setMidiDevice (i >= 0 && i < devs.size() ? devs[i].identifier : String());
+    };
+    fillDevices();
     startTimerHz (30);
+}
+
+void VoixMidiEditor::fillDevices()
+{
+    devs = MidiOutput::getAvailableDevices();
+    midiOut.clear (dontSendNotification);
+    midiOut.addItem ("Aucune sortie", 1);
+    int sel = 1;
+    const auto cur = proc.getMidiDevice();
+    for (int i = 0; i < devs.size(); ++i)
+    {
+        midiOut.addItem (devs[i].name, i + 2);
+        if (cur.isNotEmpty() && devs[i].identifier == cur) sel = i + 2;
+    }
+    midiOut.setSelectedId (sel, dontSendNotification);
 }
 
 void VoixMidiEditor::paint (Graphics& g)
@@ -177,6 +208,13 @@ void VoixMidiEditor::resized()
 
     auto rowBtn = r.removeFromBottom (36);
     r.removeFromBottom (8);
+    auto rowLive = r.removeFromBottom (32);
+    r.removeFromBottom (8);
+    liveBtn.setBounds (rowLive.removeFromLeft (120));
+    lPort.setBounds (rowLive.removeFromLeft (80));
+    refreshBtn.setBounds (rowLive.removeFromRight (100).reduced (0, 2));
+    rowLive.removeFromRight (6);
+    midiOut.setBounds (rowLive.reduced (0, 2));
     pad.setBounds (r.removeFromBottom (44));
     r.removeFromBottom (8);
 

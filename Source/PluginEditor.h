@@ -35,7 +35,12 @@ private:
     VoixMidiProcessor& proc;
 
     juce::TextButton recBtn { "Enregistrer" }, stopBtn { "Stop" }, clearBtn { "Effacer" }, saveBtn { "Exporter .mid" };
-    juce::ComboBox bars, quant, scale, root;
+    juce::ComboBox bars, quant, scale, root, midiOut;
+    juce::ToggleButton liveBtn { "Mode live" };
+    juce::TextButton refreshBtn { "Actualiser" };
+    juce::Label lPort { {}, "Sortie MIDI" };
+    juce::Array<juce::MidiDeviceInfo> devs;
+    void fillDevices();
     juce::Slider oct, sens;
     juce::Label liveLbl, statusLbl;
     juce::Label lBars { {}, "Mesures" }, lQuant { {}, "Quantif." }, lScale { {}, "Gamme" },
@@ -44,6 +49,8 @@ private:
     DragPad pad;
 
     using CA = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
+    using BA = juce::AudioProcessorValueTreeState::ButtonAttachment;
+    std::unique_ptr<BA> aLive;
     using SA = juce::AudioProcessorValueTreeState::SliderAttachment;
     std::unique_ptr<CA> aBars, aQuant, aScale, aRoot;
     std::unique_ptr<SA> aOct, aSens;

@@ -6,6 +6,59 @@
 
 struct Note { int midi; double start, dur; int vel; };
 
+// Envoie les notes vers un port MIDI depuis un thread dedie (pas de MIDI sur le thread audio)
+class MidiSender : public juce::Thread
+{
+public:
+    MidiSender() : juce::Thread ("VoixMidi out") { startThread(); }
+    ~MidiSender() override { stopThread (500); }
+
+    void push (bool on, int note, int vel)
+    {
+        int s1, n1, s2, n2;
+        fifo.prepareToWrite (1, s1, n1, s2, n2);
+        if (n1 > 0) { buf[s1] = { on, note, vel }; fifo.finishedWrite (1); evt.signal(); }
+    }
+    void setDevice (const juce::String& id)
+    {
+        std::unique_ptr<juce::MidiOutput> o;
+        if (id.isNotEmpty()) o = juce::MidiOutput::openDevice (id);
+        const juce::ScopedLock sl (lock);
+        if (out) out->sendMessageNow (juce::MidiMessage::allNotesOff (1));
+        out = std::move (o);
+        open = out != nullptr;
+    }
+    bool isOpen() const { return open.load(); }
+
+    void run() override
+    {
+        while (! threadShouldExit())
+        {
+            evt.wait (100);
+            while (fifo.getNumReady() > 0)
+            {
+                int s1, n1, s2, n2;
+                fifo.prepareToRead (1, s1, n1, s2, n2);
+                if (n1 <= 0) break;
+                const Ev e = buf[s1];
+                fifo.finishedRead (1);
+                const juce::ScopedLock sl (lock);
+                if (out)
+                    out->sendMessageNow (e.on ? juce::MidiMessage::noteOn (1, e.note, (juce::uint8) e.vel)
+                                              : juce::MidiMessage::noteOff (1, e.note, (juce::uint8) 0));
+            }
+        }
+    }
+private:
+    struct Ev { bool on; int note, vel; };
+    juce::AbstractFifo fifo { 256 };
+    Ev buf[256] {};
+    juce::WaitableEvent evt;
+    juce::CriticalSection lock;
+    std::unique_ptr<juce::MidiOutput> out;
+    std::atomic<bool> open { false };
+};
+
 class VoixMidiProcessor : public juce::AudioProcessor
 {
 public:
@@ -42,6 +95,9 @@ public:
     void clearNotes();
     std::vector<Note> getNotes() const;      // quantised / scaled / transposed
     int loopBeats() const;
+    int mapNote (int midi) const;            // gamme + octave
+    void setMidiDevice (const juce::String& id);
+    juce::String getMidiDevice() const { const juce::ScopedLock sl (lock); return midiId; }
     juce::File writeMidi (const juce::File& folder, const juce::String& name);
 
     juce::AudioProcessorValueTreeState apvts;
@@ -55,6 +111,8 @@ private:
     void analyse (double frameBeat, bool playing);
     void feed (double beat, float m, float rms);
     void closeNote();
+    void emitOn();
+    void emitOff();
 
     static constexpr int WIN = 2048, HOP = 512;
     float ring[WIN] {}, win[WIN] {};
@@ -68,7 +126,13 @@ private:
     double curLast = 0, candB = 0, recStart = -1.0;
     int cand = -999, candN = 0, silent = 0;
 
-    juce::CriticalSection lock;
+    MidiSender sender;
+    juce::String midiId;
+    int heldNote = -1;
+    bool liveActive = false;
+    double liveT = 0.0;
+
+    mutable juce::CriticalSection lock;
     std::vector<Note> raw;
     std::atomic<bool> pendingArm { false }, pendingStop { false };
 
